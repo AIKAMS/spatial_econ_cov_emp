@@ -1,2 +1,2 @@
-# spatial_econ_cov_emp
-Spatial economics group project for COVID impact on employment in the UK
+# COVID impact on employment in the UK
+Spatial economics group project assessing the impact of COVID on employment in the UK using shift share IV and/or HHI regional specialisation methods.
