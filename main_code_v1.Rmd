@@ -1,0 +1,163 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+# Setup
+```{r}
+# Load required libraries
+library(dplyr)
+library(readr)
+library(tidyr)
+library(stringr)
+library(purrr)
+```
+
+```{r}
+# Set paths
+data_directory <- "data/bres/"
+output_directory <- "output/"
+
+# Create output directory
+if (!dir.exists(output_directory)) dir.create(output_directory, recursive = TRUE)
+```
+
+# Data Processing
+
+```{r}
+cat("Starting employment data processing...\n")
+
+# Load and combine all CSV files
+cat("Loading CSV files...\n")
+raw_data <- list.files(data_directory, pattern = "\\.csv$", full.names = TRUE) %>%
+  map_dfr(~read_csv(.x, col_types = cols(.default = "c"), show_col_types = FALSE))
+
+cat("Loaded", nrow(raw_data), "rows from", 
+    length(list.files(data_directory, pattern = "\\.csv$")), "files\n")
+
+# Clean and standardize data
+cat("Cleaning data...\n")
+cleaned_data <- raw_data %>%
+  mutate(
+    date = as.numeric(DATE),
+    region = str_trim(GEOGRAPHY_NAME),
+    industry = str_trim(INDUSTRY_NAME),
+    employment = as.numeric(OBS_VALUE)
+  ) %>%
+  filter(
+    !is.na(date),
+    !is.na(region), 
+    !is.na(industry),
+    !is.na(employment),
+    employment > 0,
+    str_detect(EMPLOYMENT_STATUS_NAME, "Employ")
+  ) %>%
+  select(date, region, industry, employment) %>%
+  arrange(date, region, industry)
+
+cat("Cleaned data:", nrow(cleaned_data), "rows\n")
+cat("Years:", min(cleaned_data$date), "to", max(cleaned_data$date), "\n")
+cat("Regions:", n_distinct(cleaned_data$region), "\n")
+cat("Industries:", n_distinct(cleaned_data$industry), "\n")
+
+# Create regional summary
+regional_summary <- cleaned_data %>%
+  group_by(date, region) %>%
+  summarise(
+    total_employment = sum(employment),
+    num_industries = n_distinct(industry),
+    .groups = "drop"
+  )
+
+# Create time series matrix
+employment_time_series <- cleaned_data %>%
+  group_by(date, region) %>%
+  summarise(total_employment = sum(employment), .groups = "drop") %>%
+  pivot_wider(names_from = region, values_from = total_employment) %>%
+  arrange(date)
+```
+#### Related and Unrelated Variety Indexes ####
+
+SIC method
+```{r}
+cat("Calculating variety indexes (conventional SIC-based method)...\n")
+
+# Prepare data with industry classification levels
+employment_with_codes <- cleaned_data %>%
+  mutate(
+    # Extract 2-digit industry code for related variety (cognitive proximity)
+    industry_2digit = str_sub(industry, 1, 2),
+    # Extract 1-digit industry code for unrelated variety (portfolio effect)  
+    industry_1digit = str_sub(industry, 1, 1)
+  ) %>%
+  # Calculate employment shares by region and year
+  group_by(date, region) %>%
+  mutate(
+    total_employment = sum(employment),
+    employment_share = employment / total_employment
+  ) %>%
+  ungroup()
+
+# Calculate Related Variety using entropy within 2-digit industry classes
+cat("Calculating Related Variety (entropy within 2-digit classes)...\n")
+related_variety_data <- employment_with_codes %>%
+  group_by(date, region, industry_2digit) %>%
+  summarise(
+    group_employment = sum(employment),
+    group_share = sum(employment_share),
+    .groups = "drop"
+  ) %>%
+  group_by(date, region) %>%
+  mutate(
+    # Calculate entropy within each 2-digit group
+    # Only calculate if group has more than 1 industry
+    within_group_entropy = ifelse(
+      n() > 1,
+      {
+        # Normalise shares within the group
+        within_shares <- group_share / sum(group_share)
+        # Calculate entropy: -Σ(p_i * log2(p_i))
+        -sum(within_shares * log2(within_shares))
+      },
+      0
+    )
+  ) %>%
+  # Weight entropy by group's share of total employment
+  mutate(weighted_entropy = group_share * within_group_entropy) %>%
+  group_by(date, region) %>%
+  summarise(
+    related_variety = sum(weighted_entropy, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Calculate Unrelated Variety using entropy across 1-digit industry classes
+cat("Calculating Unrelated Variety (entropy across 1-digit classes)...\n")
+unrelated_variety_data <- employment_with_codes %>%
+  group_by(date, region, industry_1digit) %>%
+  summarise(group_share = sum(employment_share), .groups = "drop") %>%
+  group_by(date, region) %>%
+  summarise(
+    # Calculate entropy across 1-digit industries
+    unrelated_variety = -sum(group_share * log2(group_share)),
+    .groups = "drop"
+  )
+
+# Calculate Total Variety (Jacobs externalities) across all individual industries
+cat("Calculating Total Variety (Jacobs externalities)...\n")
+total_variety_data <- employment_with_codes %>%
+  group_by(date, region) %>%
+  summarise(
+    # Calculate entropy across all industries
+    total_variety = -sum(employment_share * log2(employment_share)),
+    .groups = "drop"
+  )
+
+# Combine all variety measures
+variety_indexes <- related_variety_data %>%
+  left_join(unrelated_variety_data, by = c("date", "region")) %>%
+  left_join(total_variety_data, by = c("date", "region")) %>%
+  arrange(date, region)
+
+
+```
+
